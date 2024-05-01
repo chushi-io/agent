@@ -1,8 +1,16 @@
 package driver
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"context"
 	"errors"
+	"fmt"
 	"github.com/hashicorp/go-tfe"
+	"io"
+	"os"
+	"path/filepath"
 )
 
 type Job struct {
@@ -55,4 +63,53 @@ type Driver interface {
 	Start(job *Job) (*Job, error)
 	Wait(job *Job) (*Job, error)
 	Cleanup(job *Job) error
+}
+
+func downloadConfigurationVersion(client *tfe.Client, run *tfe.Run) (string, error) {
+	data, err := client.ConfigurationVersions.Download(context.TODO(), run.ConfigurationVersion.ID)
+	if err != nil {
+		return "", err
+	}
+	r := bytes.NewReader(data)
+	uncompressedStream, err := gzip.NewReader(r)
+	if err != nil {
+		return "", err
+	}
+
+	tarReader := tar.NewReader(uncompressedStream)
+	dname, err := os.MkdirTemp(os.TempDir(), "chushi")
+	if err != nil {
+		return "", err
+	}
+	for true {
+		header, err := tarReader.Next()
+
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			return "", err
+		}
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.Mkdir(filepath.Join(dname, header.Name), 0755); err != nil {
+				return "", err
+			}
+		case tar.TypeReg:
+			outFile, err := os.Create(filepath.Join(dname, header.Name))
+			if err != nil {
+				return "", err
+			}
+			if _, err := io.Copy(outFile, tarReader); err != nil {
+				return "", err
+			}
+			outFile.Close()
+
+		default:
+			return "", errors.New(fmt.Sprintf("ExtractTarGz: uknown type: %s in %s", header.Typeflag, header.Name))
+		}
+	}
+	return dname, nil
 }

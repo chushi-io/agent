@@ -32,8 +32,12 @@ type Docker struct {
 
 func (d Docker) Start(job *Job) (*Job, error) {
 
+	dir, err := downloadConfigurationVersion(d.Sdk, job.Spec.Run)
+	if err != nil {
+		return nil, err
+	}
 	// Pull the image
-	_, err := d.Client.ImagePull(context.Background(), job.Spec.Image, image.PullOptions{})
+	_, err = d.Client.ImagePull(context.Background(), job.Spec.Image, image.PullOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +74,7 @@ func (d Docker) Start(job *Job) (*Job, error) {
 			Mounts: []mount.Mount{
 				{
 					Type:   mount.TypeBind,
-					Source: "/tmp",
+					Source: dir,
 					Target: "/workspace/",
 				},
 			},
