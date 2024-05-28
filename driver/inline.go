@@ -2,6 +2,7 @@ package driver
 
 import (
 	"context"
+	"fmt"
 	"github.com/chushi-io/agent/runner"
 	"github.com/hashicorp/go-tfe"
 	"go.uber.org/zap"
@@ -25,26 +26,31 @@ func NewInlineRunner(logger *zap.Logger, grpcUrl string, client *tfe.Client) Inl
 
 func (i Inline) Start(job *Job) (*Job, error) {
 	// Create a temp directory
+	fmt.Println("Starting inline job")
 	dir, err := downloadConfigurationVersion(i.Client, job.Spec.Run)
 	if err != nil {
 		return nil, err
 	}
 
 	job.Status.Metadata["git_directory"] = dir
+	fmt.Printf("Git Directory: %s", dir)
 	return job, nil
 }
 
 func (i Inline) Wait(job *Job) (*Job, error) {
 	rnr := runner.New(
 		runner.WithLogger(i.Logger),
-		runner.WithGrpc(i.GrpcUrl),
+		runner.WithGrpc(i.GrpcUrl, os.Getenv("RUNNER_TOKEN")),
 		runner.WithWorkingDirectory(filepath.Join(
 			job.Status.Metadata["git_directory"],
 			job.Spec.Workspace.WorkingDirectory,
 		)),
+		// TODO: Replace with appropriate version
 		runner.WithVersion("1.6.2"),
+		// TODO: Replace with appropriate operation
 		runner.WithOperation("plan"),
 		runner.WithRunId(job.Spec.Run.ID),
+		runner.WithBackendToken(job.Spec.Token),
 	)
 
 	job.Status.State = JobStateRunning

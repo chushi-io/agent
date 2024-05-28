@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	agentv1 "github.com/chushi-io/agent/gen/agent/v1"
+	"github.com/chushi-io/agent/gen/agent/v1/agentv1connect"
+	"github.com/chushi-io/agent/internal/auth"
 	"github.com/chushi-io/agent/runner/installer"
-	v1 "github.com/chushi-io/chushi/gen/agent/v1"
-	agentv1 "github.com/chushi-io/chushi/gen/agent/v1/agentv1connect"
 	"github.com/hashicorp/go-version"
 	"github.com/hashicorp/terraform-exec/tfexec"
 	"go.uber.org/zap"
@@ -16,22 +18,24 @@ import (
 	"path/filepath"
 )
 
-type RunOptions struct {
-}
-
 type Runner struct {
 	logger           *zap.Logger
 	grpcUrl          string
 	workingDirectory string
 	version          string
 	operation        string
+	token            string
 	runId            string
+	isSpeculative    bool
+	backendToken     string
 
 	writer io.Writer
 }
 
 func New(options ...func(*Runner)) *Runner {
-	runner := &Runner{}
+	runner := &Runner{
+		isSpeculative: false,
+	}
 	for _, o := range options {
 		o(runner)
 	}
@@ -44,9 +48,16 @@ func WithLogger(logger *zap.Logger) func(*Runner) {
 	}
 }
 
-func WithGrpc(grpcUrl string) func(*Runner) {
+func WithBackendToken(backendToken string) func(*Runner) {
+	return func(runner *Runner) {
+		runner.backendToken = backendToken
+	}
+}
+
+func WithGrpc(grpcUrl string, token string) func(*Runner) {
 	return func(runner *Runner) {
 		runner.grpcUrl = grpcUrl
+		runner.token = token
 	}
 }
 
@@ -75,7 +86,19 @@ func WithRunId(runId string) func(runner *Runner) {
 }
 
 func (r *Runner) Run(ctx context.Context, out io.Writer) error {
-	adapter := newLogAdapter(r.grpcUrl, r.runId)
+	interceptors := connect.WithInterceptors(
+		interceptor(r.runId, r.token),
+	)
+
+	adapter := newLogAdapter(
+		agentv1connect.NewLogsClient(
+			newInsecureClient(),
+			r.grpcUrl,
+			connect.WithGRPC(),
+			interceptors,
+		),
+		r.runId,
+	)
 	r.writer = io.MultiWriter(adapter, out)
 
 	r.logger.Info("installing tofu", zap.String("version", r.version))
@@ -93,21 +116,46 @@ func (r *Runner) Run(ctx context.Context, out io.Writer) error {
 		return err
 	}
 
+	// Copy our token to the filesystem
+	pwd, _ := os.Getwd()
+	err = os.WriteFile(filepath.Join(pwd, ".terraformrc"), []byte(fmt.Sprintf(`
+credentials "caring-foxhound-whole.ngrok-free.app" {
+  token = "%s"
+}
+`, r.backendToken)), 0644)
+	defer os.Remove(filepath.Join(pwd, ".terraformrc"))
+	tf.SetStdout(os.Stdout)
+	tf.SetStderr(os.Stdout)
+	tf.SetEnv(map[string]string{
+		"TF_FORCE_LOCAL_BACKEND": "1",
+	})
 	r.logger.Info("intializing tofu")
 	err = tf.Init(ctx, tfexec.Upgrade(false))
 	if err != nil {
 		return err
 	}
 
+	r.logger.Info("tofu initialized")
 	var hasChanges bool
 
 	switch r.operation {
 	case "plan":
-		hasChanges, err = tf.PlanJSON(ctx, r.writer, tfexec.Out("tfplan"))
+		args := []tfexec.PlanOption{
+			tfexec.Out("tfplan"),
+		}
+		if r.isSpeculative {
+			args = append(args, tfexec.Lock(false))
+		}
+		r.logger.Info("Running plan")
+		hasChanges, err = tf.PlanJSON(ctx, r.writer, args...)
 	case "apply":
+		r.logger.Info("Starting apply")
 		err = tf.ApplyJSON(ctx, r.writer)
 	case "destroy":
+		r.logger.Info("Starting destroy")
 		err = tf.DestroyJSON(ctx, r.writer)
+	case "refresh_only":
+	case "empty_apply":
 	default:
 		err = errors.New("command not found")
 	}
@@ -135,14 +183,28 @@ func (r *Runner) Run(ctx context.Context, out io.Writer) error {
 }
 
 func (r *Runner) uploadPlan(p []byte) error {
-	planClient := agentv1.NewPlansClient(
+	planClient := agentv1connect.NewPlansClient(
 		newInsecureClient(),
 		r.grpcUrl,
 		connect.WithGRPC(),
 	)
-	_, err := planClient.UploadPlan(context.TODO(), connect.NewRequest(&v1.UploadPlanRequest{
+	_, err := planClient.UploadPlan(context.TODO(), connect.NewRequest(&agentv1.UploadPlanRequest{
 		Content: base64.StdEncoding.EncodeToString(p),
 		RunId:   r.runId,
 	}))
 	return err
+}
+
+func interceptor(runId string, token string) connect.UnaryInterceptorFunc {
+	int := func(next connect.UnaryFunc) connect.UnaryFunc {
+		return connect.UnaryFunc(func(
+			ctx context.Context,
+			req connect.AnyRequest,
+		) (connect.AnyResponse, error) {
+			req.Header().Set(auth.TokenHeader, token)
+			req.Header().Set(auth.RunIdHeader, runId)
+			return next(ctx, req)
+		})
+	}
+	return connect.UnaryInterceptorFunc(int)
 }

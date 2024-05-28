@@ -114,6 +114,10 @@ func podSpecForRun(job *Job) *v1.Pod {
 			Name:  "TF_HTTP_USERNAME",
 			Value: "runner",
 		},
+		{
+			Name:  "RUNNER_TOKEN",
+			Value: job.Spec.ProxyToken,
+		},
 	}
 	for _, variable := range job.Spec.Variables {
 		if !variable.HCL {

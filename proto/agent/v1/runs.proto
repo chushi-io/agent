@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package agent.v1;
+
+service Runs {
+  rpc UpdateStatus(UpdateRunStatusRequest) returns (Run) {}
+}
+
+message UpdateRunStatusRequest {
+  string id = 1;
+  string status = 2;
+}
+
+message Run {
+  string id = 1;
+}

@@ -27,6 +27,8 @@ type JobSpec struct {
 	Credentials    string
 	Variables      []*tfe.Variable
 	ConfigVersion  *tfe.ConfigurationVersion
+	ProxyToken     string
+	Operation      string
 }
 
 func NewJob(spec *JobSpec) *Job {
@@ -81,6 +83,7 @@ func downloadConfigurationVersion(client *tfe.Client, run *tfe.Run) (string, err
 	if err != nil {
 		return "", err
 	}
+	fmt.Printf("Temp directory: %s\n", dname)
 	for true {
 		header, err := tarReader.Next()
 
@@ -94,11 +97,16 @@ func downloadConfigurationVersion(client *tfe.Client, run *tfe.Run) (string, err
 
 		switch header.Typeflag {
 		case tar.TypeDir:
+			fmt.Println(filepath.Join(dname, header.Name))
 			if err := os.Mkdir(filepath.Join(dname, header.Name), 0755); err != nil {
 				return "", err
 			}
 		case tar.TypeReg:
-			outFile, err := os.Create(filepath.Join(dname, header.Name))
+			archiveFilePath := filepath.Join(dname, header.Name)
+			if err := os.MkdirAll(filepath.Dir(archiveFilePath), 0770); err != nil {
+				return "", err
+			}
+			outFile, err := os.Create(archiveFilePath)
 			if err != nil {
 				return "", err
 			}

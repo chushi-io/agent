@@ -4,7 +4,13 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"github.com/chushi-io/agent/driver"
+	"github.com/chushi-io/agent/internal/auth"
+	"github.com/chushi-io/agent/internal/server"
+	"github.com/chushi-io/agent/types"
+	"github.com/dghubble/sling"
+	"github.com/goxiaoy/go-eventbus"
 	"github.com/hashicorp/go-tfe"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
@@ -16,21 +22,64 @@ import (
 
 type Agent struct {
 	id                    string
-	grpcUrl               string
 	runnerImage           string
 	runnerImagePullPolicy string
 	logger                *zap.Logger
 	organizationId        string
 	sdk                   *tfe.Client
 	driver                driver.Driver
+	chushiClient          *sling.Sling
+	authorizer            *auth.Auth
+
+	bus *eventbus.EventBus
 }
 
 func New(options ...func(*Agent)) *Agent {
-	agent := &Agent{}
-	for _, o := range options {
-		o(agent)
+	ag := &Agent{
+		bus: eventbus.New(),
 	}
-	return agent
+	for _, o := range options {
+		o(ag)
+	}
+
+	// Register event handlers
+	eventbus.Subscribe[*PlanStartedEvent](ag.bus)(func(ctx context.Context, event *PlanStartedEvent) error {
+		_, err := ag.chushiClient.Put(fmt.Sprintf("/agents/v1/plans/%s", event.Plan.ID)).BodyJSON(&types.RunStatusUpdate{
+			Status: "started",
+		}).ReceiveSuccess(nil)
+		return err
+	})
+	eventbus.Subscribe[*PlanCompletedEvent](ag.bus)(func(ctx context.Context, event *PlanCompletedEvent) error {
+		_, err := ag.chushiClient.Put(fmt.Sprintf("/agents/v1/plans/%s", event.Plan.ID)).BodyJSON(&types.RunStatusUpdate{
+			Status: "finished",
+		}).ReceiveSuccess(nil)
+		return err
+	})
+	eventbus.Subscribe[*PlanFailedEvent](ag.bus)(func(ctx context.Context, event *PlanFailedEvent) error {
+		_, err := ag.chushiClient.Put(fmt.Sprintf("/agents/v1/plans/%s", event.Plan.ID)).BodyJSON(&types.RunStatusUpdate{
+			Status: "errored",
+		}).ReceiveSuccess(nil)
+		return err
+	})
+	eventbus.Subscribe[*ApplyStartedEvent](ag.bus)(func(ctx context.Context, event *ApplyStartedEvent) error {
+		_, err := ag.chushiClient.Put(fmt.Sprintf("/agents/v1/applies/%s", event.Apply.ID)).BodyJSON(&types.RunStatusUpdate{
+			Status: "started",
+		}).ReceiveSuccess(nil)
+		return err
+	})
+	eventbus.Subscribe[*ApplyCompletedEvent](ag.bus)(func(ctx context.Context, event *ApplyCompletedEvent) error {
+		_, err := ag.chushiClient.Put(fmt.Sprintf("/agents/v1/applies/%s", event.Apply.ID)).BodyJSON(&types.RunStatusUpdate{
+			Status: "finished",
+		}).ReceiveSuccess(nil)
+		return err
+	})
+	eventbus.Subscribe[*ApplyFailedEvent](ag.bus)(func(ctx context.Context, event *ApplyFailedEvent) error {
+		_, err := ag.chushiClient.Put(fmt.Sprintf("/agents/v1/applies/%s", event.Apply.ID)).BodyJSON(&types.RunStatusUpdate{
+			Status: "errored",
+		}).ReceiveSuccess(nil)
+		return err
+	})
+	return ag
 }
 
 func WithSdk(sdk *tfe.Client) func(agent *Agent) {
@@ -64,16 +113,68 @@ func WithLogger(logger *zap.Logger) func(agent *Agent) {
 	}
 }
 
+func WithOrganizationId(organizationId string) func(agent *Agent) {
+	return func(agent *Agent) {
+		agent.organizationId = organizationId
+	}
+}
+
+func WithChushiClient(client *sling.Sling) func(agent *Agent) {
+	return func(agent *Agent) {
+		agent.chushiClient = client
+	}
+}
+
+func WithAuthorizer(authorizer *auth.Auth) func(agent *Agent) {
+	return func(agent *Agent) {
+		agent.authorizer = authorizer
+	}
+}
+
+func (a *Agent) Grpc(addr string) error {
+	srv := server.New(a.chushiClient, a.authorizer)
+	return http.ListenAndServe(addr, srv)
+}
+
 func (a *Agent) Run(token string) error {
 	for {
+		a.logger.Debug("Fetching runs")
 		runQueue, err := a.sdk.Organizations.ReadRunQueue(context.TODO(), a.organizationId, tfe.ReadRunQueueOptions{})
 		if err != nil {
 			return err
 		}
 		for _, run := range runQueue.Items {
+			ctx := context.Background()
+
+			var operation string
+			if run.Status == tfe.RunApplyQueued {
+				operation = "apply"
+			} else if run.Status == tfe.RunPlanQueued {
+				operation = "plan"
+			} else {
+				return errors.New(fmt.Sprintf("invalid operation provided: %s", run.Status))
+			}
+
+			if operation == "plan" {
+				eventbus.Publish[*PlanStartedEvent](a.bus)(ctx, &PlanStartedEvent{Plan: run.Plan})
+			} else {
+				eventbus.Publish[*ApplyStartedEvent](a.bus)(ctx, &ApplyStartedEvent{Apply: run.Apply})
+			}
+
+			a.logger.Debug("Starting run", zap.String("run", run.ID))
 			if err := a.handle(run, token); err != nil {
-				a.logger.Error(err.Error())
+				a.logger.Error("Run failed", zap.Error(err))
+				if operation == "plan" {
+					eventbus.Publish[*PlanFailedEvent](a.bus)(ctx, &PlanFailedEvent{Plan: run.Plan, Error: err})
+				} else {
+					eventbus.Publish[*ApplyFailedEvent](a.bus)(ctx, &ApplyFailedEvent{Apply: run.Apply, Error: err})
+				}
 				continue
+			}
+			if operation == "plan" {
+				eventbus.Publish[*PlanCompletedEvent](a.bus)(ctx, &PlanCompletedEvent{Plan: run.Plan})
+			} else {
+				eventbus.Publish[*ApplyCompletedEvent](a.bus)(ctx, &ApplyCompletedEvent{Apply: run.Apply})
 			}
 			a.logger.Info("Run completed", zap.String("run.id", run.ID))
 		}
@@ -82,42 +183,37 @@ func (a *Agent) Run(token string) error {
 }
 
 func (a *Agent) handle(run *tfe.Run, token string) error {
-
 	a.logger.Debug("getting workspace data")
 	ws, err := a.sdk.Workspaces.Read(context.TODO(), a.organizationId, run.Workspace.ID)
 	if err != nil {
 		return err
 	}
 
+	fmt.Println(ws.WorkingDirectory)
 	// TODO: Should we just kick off the job, and let the
 	// runner itself just fail if its locked?
 	if ws.Locked {
 		return errors.New("workspace is already locked")
 	}
-	//
-	//a.logger.Debug("generating token for runner")
-	//token, err := a.generateToken(ws.Msg.Workspace.Id, run.Id, a.organizationId)
-	//if err != nil {
-	//	return err
-	//}
 
-	a.logger.Debug("updating run status")
-	//if _, err := a.runsClient.Update(context.TODO(), connect.NewRequest(&apiv1.UpdateRunRequest{
-	//	Id:     run.Id,
-	//	Status: types.RunStatusRunning,
-	//})); err != nil {
-	//	return err
-	//}
-
-	a.logger.Debug("getting configuration version")
-	confVersion, err := a.sdk.ConfigurationVersions.Read(context.TODO(), run.ConfigurationVersion.ID)
+	// Get the TF_TOKEN for the workspace to authenticate to the backend
+	type TokenResponse struct {
+		Token string `json:"token"`
+	}
+	var tokenResponse TokenResponse
+	_, err = a.chushiClient.Get(fmt.Sprintf("/agents/v1/runs/%s/token", run.ID)).ReceiveSuccess(&tokenResponse)
 	if err != nil {
 		return err
 	}
-	//creds, err := a.wsClient.GetVcsConnection(context.TODO(), connect.NewRequest(&apiv1.GetVcsConnectionRequest{
-	//	WorkspaceId:  ws.Msg.Workspace.Id,
-	//	ConnectionId: ws.Msg.Workspace.Vcs.ConnectionId,
-	//}))
+
+	// Generate a token for use with the proxy
+	proxyToken, err := a.authorizer.GenerateToken(run.ID)
+	if err != nil {
+		return err
+	}
+
+	a.logger.Debug("getting configuration version")
+	confVersion, err := a.sdk.ConfigurationVersions.Read(context.TODO(), run.ConfigurationVersion.ID)
 	if err != nil {
 		return err
 	}
@@ -134,13 +230,15 @@ func (a *Agent) handle(run *tfe.Run, token string) error {
 		Image:          a.getRunnerImage(),
 		Run:            run,
 		Workspace:      ws,
-		Token:          token,
+		Token:          tokenResponse.Token,
 		ConfigVersion:  confVersion,
+		ProxyToken:     proxyToken,
 		//Variables:     variables.Items,
 	})
 
 	a.logger.Debug("starting job")
 	_, err = a.driver.Start(job)
+
 	if err != nil {
 		return err
 	}
@@ -152,30 +250,16 @@ func (a *Agent) handle(run *tfe.Run, token string) error {
 		return err
 	}
 
-	//if job.Status.State != "succeeded" {
-	//	if _, err := a.runsClient.Update(context.TODO(), connect.NewRequest(&apiv1.UpdateRunRequest{
-	//		Id:     run.Id,
-	//		Status: types.RunStatusFailed,
-	//	})); err != nil {
-	//		return err
-	//	}
-	//	return errors.New("workspace failed")
-	//}
-
 	a.logger.Debug("updating run as completed")
-	// Lastly, post updates back to the run
-	//_, err = a.runsClient.Update(context.TODO(), connect.NewRequest(&apiv1.UpdateRunRequest{
-	//	Id:     run.Id,
-	//	Status: types.RunStatusCompleted,
-	//}))
-	return err
+
+	return nil
 }
 
 func (a *Agent) getRunnerImage() string {
 	if a.runnerImage != "" {
 		return a.runnerImage
 	}
-	return "ghcr.io/chushi-io/chushi:latest"
+	return "ghcr.io/chushi-io/agent:latest"
 }
 
 func (a *Agent) getImagePullPolicy() v1.PullPolicy {

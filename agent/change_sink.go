@@ -2,11 +2,13 @@ package agent
 
 import (
 	"encoding/json"
-	"github.com/chushi-io/chushi/pkg/sdk"
+	"fmt"
+	"github.com/chushi-io/agent/types"
+	"github.com/dghubble/sling"
 )
 
 type ChangeSink struct {
-	Sdk   *sdk.Sdk
+	Sdk   *sling.Sling
 	RunId string
 }
 
@@ -33,11 +35,15 @@ func (sink ChangeSink) Write(p []byte) (int, error) {
 		return 0, nil
 	}
 
-	_, err := sink.Sdk.Runs().Update(&sdk.UpdateRunParams{
-		RunId:   sink.RunId,
+	update := &types.RunStatusUpdate{
 		Add:     summary.Changes.Add,
 		Change:  summary.Changes.Change,
 		Destroy: summary.Changes.Remove,
-	})
-	return 0, err
+	}
+	_, err := sink.Sdk.Put(fmt.Sprintf("agents/v1/runs/%s", sink.RunId)).BodyJSON(update).ReceiveSuccess(nil)
+	if err != nil {
+		return 0, err
+	}
+
+	return 0, nil
 }

@@ -49,6 +49,7 @@ func (d Docker) Start(job *Job) (*Job, error) {
 		fmt.Sprintf("CHUSHI_ACCESS_TOKEN=%s", job.Spec.Token),
 		fmt.Sprintf("TF_HTTP_PASSWORD=%s", job.Spec.Token),
 		fmt.Sprintf("TF_HTTP_USERNAME=%s", "runner"),
+		fmt.Sprintf("RUNNER_TOKEN=%s", job.Spec.ProxyToken),
 	}
 
 	for _, variable := range job.Spec.Variables {

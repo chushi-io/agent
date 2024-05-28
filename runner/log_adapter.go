@@ -4,8 +4,9 @@ import (
 	"connectrpc.com/connect"
 	"context"
 	"crypto/tls"
-	v1 "github.com/chushi-io/chushi/gen/agent/v1"
-	agentv1 "github.com/chushi-io/chushi/gen/agent/v1/agentv1connect"
+	"fmt"
+	v1 "github.com/chushi-io/agent/gen/agent/v1"
+	agentv1 "github.com/chushi-io/agent/gen/agent/v1/agentv1connect"
 	"golang.org/x/net/http2"
 	"net"
 	"net/http"
@@ -18,13 +19,14 @@ type logAdapter struct {
 	output [][]byte
 }
 
-func newLogAdapter(grpcUrl string, runId string) *logAdapter {
-	logsClient := agentv1.NewLogsClient(newInsecureClient(), grpcUrl, connect.WithGRPC())
-	adapter := &logAdapter{Logs: logsClient, RunId: runId}
+func newLogAdapter(client agentv1.LogsClient, runId string) *logAdapter {
+	//logsClient :=
+	adapter := &logAdapter{Logs: client, RunId: runId}
 	return adapter
 }
 
 func (adapter *logAdapter) Write(p []byte) (n int, err error) {
+	fmt.Println(string(p))
 	adapter.output = append(adapter.output, p)
 	_, err = adapter.Logs.StreamLogs(context.TODO(), connect.NewRequest(&v1.StreamLogsRequest{Content: string(p)}))
 	if err != nil {

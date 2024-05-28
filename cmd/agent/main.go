@@ -11,10 +11,6 @@ var mainCmd = &cobra.Command{
 	Short: "Run the Chushi agent",
 }
 
-func init() {
-
-}
-
 func main() {
 	cmd, _, err := mainCmd.Find(os.Args[1:])
 	if err != nil || cmd == nil {

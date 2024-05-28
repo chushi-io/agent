@@ -17,7 +17,7 @@ executions occuring for Chushi workspaces.'
 `,
 	// To keep the runner as small as possible, this should be
 	// the total sum of its functionality. Its responsibility
-	// should only be to install terraform (unless cached),
+	// should only be to install tofu (unless cached),
 	// initialize the workspace, and run the appropriate command
 	// The JSON output should be streamed to the Chushi server (as well
 	// as cached somewhere locally in the event of issues), and then exit.
@@ -34,7 +34,7 @@ executions occuring for Chushi workspaces.'
 
 		rnr := runner.New(
 			runner.WithLogger(logger),
-			runner.WithGrpc(grpcUrl),
+			runner.WithGrpc(grpcUrl, os.Getenv("RUNNER_TOKEN")),
 			runner.WithWorkingDirectory(workingDir),
 			runner.WithVersion(tofuVersion),
 			runner.WithOperation(args[0]),
