@@ -98,7 +98,6 @@ func runManager(cmd *cobra.Command, args []string) {
 
 	ag := agent.New(opts...)
 
-	fmt.Println("Here we go agent, here we go!")
 	go func() {
 		if err := ag.Grpc(grpcAddress); err != nil {
 			logger.Fatal(

@@ -178,7 +178,7 @@ func (a *Agent) Run(token string) error {
 			}
 			a.logger.Info("Run completed", zap.String("run.id", run.ID))
 		}
-		time.Sleep(time.Second * 2)
+		time.Sleep(time.Second * 1)
 	}
 }
 
@@ -189,7 +189,6 @@ func (a *Agent) handle(run *tfe.Run, token string) error {
 		return err
 	}
 
-	fmt.Println(ws.WorkingDirectory)
 	// TODO: Should we just kick off the job, and let the
 	// runner itself just fail if its locked?
 	if ws.Locked {

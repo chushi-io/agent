@@ -1,22 +1,32 @@
 package runner
 
 import (
-	"connectrpc.com/connect"
 	"context"
-	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
-	agentv1 "github.com/chushi-io/agent/gen/agent/v1"
-	"github.com/chushi-io/agent/gen/agent/v1/agentv1connect"
-	"github.com/chushi-io/agent/internal/auth"
 	"github.com/chushi-io/agent/runner/installer"
+	"github.com/dghubble/sling"
 	"github.com/hashicorp/go-version"
 	"github.com/hashicorp/terraform-exec/tfexec"
+	tfjson "github.com/hashicorp/terraform-json"
 	"go.uber.org/zap"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
+
+type Plan struct {
+	PlanFormatVersion  string                     `json:"plan_format_version"`
+	OutputChanges      map[string]*tfjson.Change  `json:"output_changes"`
+	ResourceChanges    []*tfjson.ResourceChange   `json:"resource_changes"`
+	ResourceDrift      []*tfjson.ResourceChange   `json:"resource_drift"`
+	RelevantAttributes []tfjson.ResourceAttribute `json:"relevant_attributes"`
+
+	ProviderFormatVersion string                            `json:"provider_format_version"`
+	ProviderSchemas       map[string]*tfjson.ProviderSchema `json:"provider_schemas"`
+}
 
 type Runner struct {
 	logger           *zap.Logger
@@ -28,6 +38,7 @@ type Runner struct {
 	runId            string
 	isSpeculative    bool
 	backendToken     string
+	client           *sling.Sling
 
 	writer io.Writer
 }
@@ -40,6 +51,12 @@ func New(options ...func(*Runner)) *Runner {
 		o(runner)
 	}
 	return runner
+}
+
+func WithClient(client *sling.Sling) func(runner *Runner) {
+	return func(runner *Runner) {
+		runner.client = client
+	}
 }
 
 func WithLogger(logger *zap.Logger) func(*Runner) {
@@ -86,20 +103,8 @@ func WithRunId(runId string) func(runner *Runner) {
 }
 
 func (r *Runner) Run(ctx context.Context, out io.Writer) error {
-	interceptors := connect.WithInterceptors(
-		interceptor(r.runId, r.token),
-	)
-
-	adapter := newLogAdapter(
-		agentv1connect.NewLogsClient(
-			newInsecureClient(),
-			r.grpcUrl,
-			connect.WithGRPC(),
-			interceptors,
-		),
-		r.runId,
-	)
-	r.writer = io.MultiWriter(adapter, out)
+	logStreamer := newLogAdapter(r.client, r.runId)
+	logger := io.MultiWriter(out, logStreamer)
 
 	r.logger.Info("installing tofu", zap.String("version", r.version))
 	ver, err := version.NewVersion(r.version)
@@ -124,8 +129,8 @@ credentials "caring-foxhound-whole.ngrok-free.app" {
 }
 `, r.backendToken)), 0644)
 	defer os.Remove(filepath.Join(pwd, ".terraformrc"))
-	tf.SetStdout(os.Stdout)
-	tf.SetStderr(os.Stdout)
+	//tf.SetStdout(os.Stdout)
+	//tf.SetStderr(os.Stdout)
 	tf.SetEnv(map[string]string{
 		"TF_FORCE_LOCAL_BACKEND": "1",
 	})
@@ -147,13 +152,13 @@ credentials "caring-foxhound-whole.ngrok-free.app" {
 			args = append(args, tfexec.Lock(false))
 		}
 		r.logger.Info("Running plan")
-		hasChanges, err = tf.PlanJSON(ctx, r.writer, args...)
+		hasChanges, err = tf.PlanJSON(ctx, logger, args...)
 	case "apply":
 		r.logger.Info("Starting apply")
-		err = tf.ApplyJSON(ctx, r.writer)
+		err = tf.ApplyJSON(ctx, logger)
 	case "destroy":
 		r.logger.Info("Starting destroy")
-		err = tf.DestroyJSON(ctx, r.writer)
+		err = tf.DestroyJSON(ctx, logger)
 	case "refresh_only":
 	case "empty_apply":
 	default:
@@ -164,11 +169,16 @@ credentials "caring-foxhound-whole.ngrok-free.app" {
 		return err
 	}
 
-	if err = adapter.Flush(); err != nil {
-		r.logger.Warn(err.Error())
+	if err := logStreamer.Flush(); err != nil {
+		return err
 	}
 
 	if r.operation == "plan" && hasChanges {
+
+		providerSchemas, err := tf.ProvidersSchema(ctx)
+		if err != nil {
+			return err
+		}
 
 		data, err := os.ReadFile(filepath.Join(r.workingDirectory, "tfplan"))
 		if err != nil {
@@ -178,33 +188,64 @@ credentials "caring-foxhound-whole.ngrok-free.app" {
 		if err := r.uploadPlan(data); err != nil {
 			return err
 		}
+
+		plan, err := tf.ShowPlanFile(ctx, filepath.Join(r.workingDirectory, "tfplan"))
+		if err != nil {
+			return err
+		}
+
+		jplan := &Plan{
+			ProviderSchemas:       providerSchemas.Schemas,
+			ProviderFormatVersion: providerSchemas.FormatVersion,
+			OutputChanges:         plan.OutputChanges,
+			ResourceChanges:       plan.ResourceChanges,
+			ResourceDrift:         plan.ResourceDrift,
+			RelevantAttributes:    plan.RelevantAttributes,
+		}
+
+		if err := r.uploadPlanJson(jplan); err != nil {
+			return err
+		}
+
+		structured, err := tf.ShowPlanFileRaw(ctx, filepath.Join(r.workingDirectory, "tfplan"))
+		if err != nil {
+			return err
+		}
+		if err := r.uploadStructuredPlan(structured); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
 func (r *Runner) uploadPlan(p []byte) error {
-	planClient := agentv1connect.NewPlansClient(
-		newInsecureClient(),
-		r.grpcUrl,
-		connect.WithGRPC(),
-	)
-	_, err := planClient.UploadPlan(context.TODO(), connect.NewRequest(&agentv1.UploadPlanRequest{
-		Content: base64.StdEncoding.EncodeToString(p),
-		RunId:   r.runId,
-	}))
+	_, err := r.client.
+		Post(fmt.Sprintf("/api/v1/plans/%s/upload", r.runId)).
+		Set("Content-Type", "application/octet-stream").
+		Body(strings.NewReader(string(p))).
+		ReceiveSuccess(nil)
 	return err
 }
 
-func interceptor(runId string, token string) connect.UnaryInterceptorFunc {
-	int := func(next connect.UnaryFunc) connect.UnaryFunc {
-		return connect.UnaryFunc(func(
-			ctx context.Context,
-			req connect.AnyRequest,
-		) (connect.AnyResponse, error) {
-			req.Header().Set(auth.TokenHeader, token)
-			req.Header().Set(auth.RunIdHeader, runId)
-			return next(ctx, req)
-		})
+func (r *Runner) uploadStructuredPlan(input string) error {
+	_, err := r.client.
+		Post(fmt.Sprintf("/api/v1/plans/%s/upload_structured", r.runId)).
+		Set("Content-Type", "application/octet-stream").
+		Body(strings.NewReader(input)).
+		ReceiveSuccess(nil)
+	return err
+}
+
+func (r *Runner) uploadPlanJson(plan *Plan) error {
+	data, err := json.Marshal(plan)
+	if err != nil {
+		return err
 	}
-	return connect.UnaryInterceptorFunc(int)
+
+	_, err = r.client.
+		Post(fmt.Sprintf("/api/v1/plans/%s/upload_json", r.runId)).
+		//Set("Content-Type", "application/octet-stream").
+		Body(strings.NewReader(string(data))).
+		ReceiveSuccess(nil)
+	return err
 }

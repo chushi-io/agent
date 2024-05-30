@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/chushi-io/agent/runner"
+	"github.com/dghubble/sling"
 	"github.com/hashicorp/go-tfe"
 	"go.uber.org/zap"
 	"os"
@@ -33,7 +34,6 @@ func (i Inline) Start(job *Job) (*Job, error) {
 	}
 
 	job.Status.Metadata["git_directory"] = dir
-	fmt.Printf("Git Directory: %s", dir)
 	return job, nil
 }
 
@@ -51,6 +51,7 @@ func (i Inline) Wait(job *Job) (*Job, error) {
 		runner.WithOperation("plan"),
 		runner.WithRunId(job.Spec.Run.ID),
 		runner.WithBackendToken(job.Spec.Token),
+		runner.WithClient(sling.New().Base("http://localhost:3000").Set("Authorization", fmt.Sprintf("Bearer %s", job.Spec.Token))),
 	)
 
 	job.Status.State = JobStateRunning
