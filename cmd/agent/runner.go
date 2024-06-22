@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"github.com/chushi-io/agent/runner"
+	"github.com/hashicorp/go-tfe"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 	"os"
@@ -32,6 +33,15 @@ executions occuring for Chushi workspaces.'
 		tofuVersion, _ := cmd.Flags().GetString("version")
 		workingDir, _ := cmd.Flags().GetString("directory")
 
+		tfeClient, err := tfe.NewClient(&tfe.Config{
+			Address:           "http://localhost:3000",
+			BasePath:          "/api/v1",
+			Token:             os.Getenv("RUNNER_TOKEN"),
+			RetryServerErrors: true,
+		})
+		if err != nil {
+			logger.Fatal(err.Error())
+		}
 		rnr := runner.New(
 			runner.WithLogger(logger),
 			runner.WithGrpc(grpcUrl, os.Getenv("RUNNER_TOKEN")),
@@ -39,6 +49,7 @@ executions occuring for Chushi workspaces.'
 			runner.WithVersion(tofuVersion),
 			runner.WithOperation(args[0]),
 			runner.WithRunId(os.Getenv("CHUSHI_RUN_ID")),
+			runner.WithSdk(tfeClient),
 		)
 
 		if err := rnr.Run(ctx, os.Stdout); err != nil {

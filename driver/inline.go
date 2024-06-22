@@ -38,6 +38,23 @@ func (i Inline) Start(job *Job) (*Job, error) {
 }
 
 func (i Inline) Wait(job *Job) (*Job, error) {
+	tfeClient, err := tfe.NewClient(&tfe.Config{
+		Address:           "http://localhost:3000",
+		BasePath:          "/api/v1",
+		Token:             os.Getenv("RUNNER_TOKEN"),
+		RetryServerErrors: true,
+	})
+	if err != nil {
+		return job, err
+	}
+
+	var operation string
+	if job.Spec.Run.Status == "plan_queued" {
+		operation = "plan"
+	} else if job.Spec.Run.Status == "apply_queued" {
+		operation = "apply"
+	}
+
 	rnr := runner.New(
 		runner.WithLogger(i.Logger),
 		runner.WithGrpc(i.GrpcUrl, os.Getenv("RUNNER_TOKEN")),
@@ -48,10 +65,11 @@ func (i Inline) Wait(job *Job) (*Job, error) {
 		// TODO: Replace with appropriate version
 		runner.WithVersion("1.6.2"),
 		// TODO: Replace with appropriate operation
-		runner.WithOperation("plan"),
+		runner.WithOperation(operation),
 		runner.WithRunId(job.Spec.Run.ID),
 		runner.WithBackendToken(job.Spec.Token),
 		runner.WithClient(sling.New().Base("http://localhost:3000").Set("Authorization", fmt.Sprintf("Bearer %s", job.Spec.Token))),
+		runner.WithSdk(tfeClient),
 	)
 
 	job.Status.State = JobStateRunning

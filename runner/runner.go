@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/chushi-io/agent/runner/installer"
 	"github.com/dghubble/sling"
+	"github.com/hashicorp/go-tfe"
 	"github.com/hashicorp/go-version"
 	"github.com/hashicorp/terraform-exec/tfexec"
 	tfjson "github.com/hashicorp/terraform-json"
@@ -39,6 +40,7 @@ type Runner struct {
 	isSpeculative    bool
 	backendToken     string
 	client           *sling.Sling
+	sdk              *tfe.Client
 
 	writer io.Writer
 }
@@ -102,7 +104,19 @@ func WithRunId(runId string) func(runner *Runner) {
 	}
 }
 
+func WithSdk(sdk *tfe.Client) func(runner *Runner) {
+	return func(runner *Runner) {
+		runner.sdk = sdk
+	}
+}
+
 func (r *Runner) Run(ctx context.Context, out io.Writer) error {
+	fmt.Println(r.runId)
+	run, err := r.sdk.Runs.Read(context.TODO(), r.runId)
+	if err != nil {
+		return err
+	}
+
 	logStreamer := newLogAdapter(r.client, r.runId)
 	logger := io.MultiWriter(out, logStreamer)
 
@@ -203,6 +217,34 @@ credentials "caring-foxhound-whole.ngrok-free.app" {
 			RelevantAttributes:    plan.RelevantAttributes,
 		}
 
+		params := &UpdatePlanParams{
+			ResourceChanges:      0,
+			ResourceDestructions: 0,
+			ResourceImports:      0,
+			ResourceAdditions:    0,
+			HasChanges:           hasChanges,
+		}
+
+		for _, resourceChange := range plan.ResourceChanges {
+			for _, action := range resourceChange.Change.Actions {
+				switch action {
+				case tfjson.ActionCreate:
+					params.ResourceAdditions++
+				case tfjson.ActionUpdate:
+					params.ResourceChanges++
+				case tfjson.ActionDelete:
+					params.ResourceDestructions++
+				}
+			}
+			if resourceChange.Change.Importing != nil {
+				params.ResourceImports++
+			}
+		}
+
+		if err := r.updatePlan(run.Plan.ID, params); err != nil {
+			return err
+		}
+
 		if err := r.uploadPlanJson(jplan); err != nil {
 			return err
 		}
@@ -246,6 +288,24 @@ func (r *Runner) uploadPlanJson(plan *Plan) error {
 		Post(fmt.Sprintf("/api/v1/plans/%s/upload_json", r.runId)).
 		//Set("Content-Type", "application/octet-stream").
 		Body(strings.NewReader(string(data))).
+		ReceiveSuccess(nil)
+	return err
+}
+
+type UpdatePlanParams struct {
+	HasChanges           bool `json:"has_changes"`
+	ResourceAdditions    int  `json:"resource_additions,omitempty"`
+	ResourceChanges      int  `json:"resource_changes,omitempty"`
+	ResourceDestructions int  `json:"resource_destructions,omitempty"`
+	ResourceImports      int  `json:"resource_imports,omitempty"`
+}
+
+func (r *Runner) updatePlan(planId string, params *UpdatePlanParams) error {
+	fmt.Printf("Params: %v\n", params)
+	_, err := r.client.
+		Put(fmt.Sprintf("/api/v1/plans/%s", planId)).
+		Set("Content-Type", "application/json").
+		BodyJSON(params).
 		ReceiveSuccess(nil)
 	return err
 }
