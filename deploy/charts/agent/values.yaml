@@ -59,4 +59,8 @@ tolerations: []
 affinity: {}
 
 agent:
-  args: {}
+  args:
+    driver: "kubernetes"
+    server-url: "https://app.chushi.io/api/v1"
+    agent-id: ""
+
