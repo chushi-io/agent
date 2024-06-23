@@ -32,8 +32,13 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           args:
           {{- range $arg, $value := .Values.agent.args }}
-            - "{{ $arg}}={{ $value }}"
+            - {{ $arg}}={{ $value | quote }}
           {{- end }}
+          envFrom:
+            {{- range $secret := .Values.secretRefs }}
+            - secretRef:
+                name: {{ $secret.name }}
+            {{- end }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:

@@ -64,3 +64,5 @@ agent:
     server-url: "https://app.chushi.io/api/v1"
     agent-id: ""
 
+secretRefs:
+  - name: chushi-io-agent
