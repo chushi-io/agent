@@ -80,24 +80,33 @@ func downloadConfigurationVersion(client *tfe.Client, run *tfe.Run) (string, err
 
 	tarReader := tar.NewReader(uncompressedStream)
 	dname, err := os.MkdirTemp(os.TempDir(), "chushi")
+
 	if err != nil {
 		return "", err
 	}
-	fmt.Printf("Temp directory: %s\n", dname)
+
+	var topLevelDir string
 	for true {
 		header, err := tarReader.Next()
 
 		if err == io.EOF {
 			break
 		}
-
 		if err != nil {
 			return "", err
 		}
 
 		switch header.Typeflag {
+
+		// For some reason, downloading the tar from github returns this header
+		// I don't know why it does, but it causes unexpected failures
+		// TODO: Write a better reason for doing this
+		case tar.TypeXGlobalHeader:
+			continue
 		case tar.TypeDir:
-			fmt.Println(filepath.Join(dname, header.Name))
+			if topLevelDir == "" {
+				topLevelDir = header.Name
+			}
 			if err := os.Mkdir(filepath.Join(dname, header.Name), 0755); err != nil {
 				return "", err
 			}
@@ -119,5 +128,6 @@ func downloadConfigurationVersion(client *tfe.Client, run *tfe.Run) (string, err
 			return "", errors.New(fmt.Sprintf("ExtractTarGz: uknown type: %s in %s", header.Typeflag, header.Name))
 		}
 	}
-	return dname, nil
+
+	return filepath.Join(dname, topLevelDir), nil
 }

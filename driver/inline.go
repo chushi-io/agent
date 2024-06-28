@@ -55,6 +55,11 @@ func (i Inline) Wait(job *Job) (*Job, error) {
 		operation = "apply"
 	}
 
+	fmt.Println(filepath.Join(
+		job.Status.Metadata["git_directory"],
+		job.Spec.Workspace.WorkingDirectory,
+	))
+
 	rnr := runner.New(
 		runner.WithLogger(i.Logger),
 		runner.WithGrpc(i.GrpcUrl, os.Getenv("RUNNER_TOKEN")),

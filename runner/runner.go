@@ -111,7 +111,7 @@ func WithSdk(sdk *tfe.Client) func(runner *Runner) {
 }
 
 func (r *Runner) Run(ctx context.Context, out io.Writer) error {
-	fmt.Println(r.runId)
+
 	run, err := r.sdk.Runs.Read(context.TODO(), r.runId)
 	if err != nil {
 		return err
@@ -125,6 +125,7 @@ func (r *Runner) Run(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+
 	install, err := installer.Install(ver, r.workingDirectory, r.logger)
 	if err != nil {
 		return err
