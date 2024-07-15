@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"github.com/chushi-io/agent/adapter"
 	"github.com/chushi-io/agent/driver"
 	"github.com/chushi-io/agent/internal/auth"
 	"github.com/chushi-io/agent/internal/server"
@@ -17,7 +18,6 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"net"
 	"net/http"
-	"time"
 )
 
 type Agent struct {
@@ -27,11 +27,12 @@ type Agent struct {
 	logger                *zap.Logger
 	organizationId        string
 	sdk                   *tfe.Client
-	driver                driver.Driver
 	chushiClient          *sling.Sling
 	authorizer            *auth.Auth
 
-	bus *eventbus.EventBus
+	adapter adapter.Adapter
+	driver  driver.Driver
+	bus     *eventbus.EventBus
 }
 
 func New(options ...func(*Agent)) *Agent {
@@ -94,6 +95,12 @@ func WithDriver(drv driver.Driver) func(agent *Agent) {
 	}
 }
 
+func WithAdapter(ad adapter.Adapter) func(agent *Agent) {
+	return func(agent *Agent) {
+		agent.adapter = ad
+	}
+}
+
 func WithAgentId(agentId string) func(agent *Agent) {
 	return func(agent *Agent) {
 		agent.id = agentId
@@ -136,53 +143,47 @@ func (a *Agent) Grpc(addr string) error {
 	return http.ListenAndServe(addr, srv)
 }
 
-func (a *Agent) Run(token string) error {
-	for {
-		a.logger.Debug("Fetching runs")
-		runQueue, err := a.sdk.Organizations.ReadRunQueue(context.TODO(), a.organizationId, tfe.ReadRunQueueOptions{})
-		if err != nil {
-			return err
+func (a *Agent) Run() error {
+	a.adapter.Listen(func(run *tfe.Run) error {
+		ctx := context.Background()
+
+		var operation string
+		if run.Status == tfe.RunApplyQueued {
+			operation = "apply"
+		} else if run.Status == tfe.RunPlanQueued {
+			operation = "plan"
+		} else {
+			return errors.New(fmt.Sprintf("invalid operation provided: %s", run.Status))
 		}
-		for _, run := range runQueue.Items {
-			ctx := context.Background()
 
-			var operation string
-			if run.Status == tfe.RunApplyQueued {
-				operation = "apply"
-			} else if run.Status == tfe.RunPlanQueued {
-				operation = "plan"
-			} else {
-				return errors.New(fmt.Sprintf("invalid operation provided: %s", run.Status))
-			}
-
-			if operation == "plan" {
-				eventbus.Publish[*PlanStartedEvent](a.bus)(ctx, &PlanStartedEvent{Plan: run.Plan})
-			} else {
-				eventbus.Publish[*ApplyStartedEvent](a.bus)(ctx, &ApplyStartedEvent{Apply: run.Apply})
-			}
-
-			a.logger.Debug("Starting run", zap.String("run", run.ID))
-			if err := a.handle(run, token); err != nil {
-				a.logger.Error("Run failed", zap.Error(err))
-				if operation == "plan" {
-					eventbus.Publish[*PlanFailedEvent](a.bus)(ctx, &PlanFailedEvent{Plan: run.Plan, Error: err})
-				} else {
-					eventbus.Publish[*ApplyFailedEvent](a.bus)(ctx, &ApplyFailedEvent{Apply: run.Apply, Error: err})
-				}
-				continue
-			}
-			if operation == "plan" {
-				eventbus.Publish[*PlanCompletedEvent](a.bus)(ctx, &PlanCompletedEvent{Plan: run.Plan})
-			} else {
-				eventbus.Publish[*ApplyCompletedEvent](a.bus)(ctx, &ApplyCompletedEvent{Apply: run.Apply})
-			}
-			a.logger.Info("Run completed", zap.String("run.id", run.ID))
+		if operation == "plan" {
+			eventbus.Publish[*PlanStartedEvent](a.bus)(ctx, &PlanStartedEvent{Plan: run.Plan})
+		} else {
+			eventbus.Publish[*ApplyStartedEvent](a.bus)(ctx, &ApplyStartedEvent{Apply: run.Apply})
 		}
-		time.Sleep(time.Second * 1)
-	}
+
+		a.logger.Debug("Starting run", zap.String("run", run.ID))
+		if err := a.handle(run); err != nil {
+			a.logger.Error("Run failed", zap.Error(err))
+			if operation == "plan" {
+				eventbus.Publish[*PlanFailedEvent](a.bus)(ctx, &PlanFailedEvent{Plan: run.Plan, Error: err})
+			} else {
+				eventbus.Publish[*ApplyFailedEvent](a.bus)(ctx, &ApplyFailedEvent{Apply: run.Apply, Error: err})
+			}
+			return nil
+		}
+		if operation == "plan" {
+			eventbus.Publish[*PlanCompletedEvent](a.bus)(ctx, &PlanCompletedEvent{Plan: run.Plan})
+		} else {
+			eventbus.Publish[*ApplyCompletedEvent](a.bus)(ctx, &ApplyCompletedEvent{Apply: run.Apply})
+		}
+		a.logger.Info("Run completed", zap.String("run.id", run.ID))
+		return nil
+	})
+	return nil
 }
 
-func (a *Agent) handle(run *tfe.Run, token string) error {
+func (a *Agent) handle(run *tfe.Run) error {
 	a.logger.Debug("getting workspace data")
 	ws, err := a.sdk.Workspaces.Read(context.TODO(), a.organizationId, run.Workspace.ID)
 	if err != nil {
@@ -218,10 +219,10 @@ func (a *Agent) handle(run *tfe.Run, token string) error {
 	}
 
 	a.logger.Debug("getting variables")
-	//variables, err := a.sdk.Variables.List(context.TODO(), ws.ID, &tfe.VariableListOptions{})
-	//if err != nil {
-	//	return err
-	//}
+	variables, err := a.sdk.Variables.List(context.TODO(), ws.ID, &tfe.VariableListOptions{})
+	if err != nil {
+		return err
+	}
 
 	// Build a job spec
 	job := driver.NewJob(&driver.JobSpec{
@@ -232,7 +233,7 @@ func (a *Agent) handle(run *tfe.Run, token string) error {
 		Token:          tokenResponse.Token,
 		ConfigVersion:  confVersion,
 		ProxyToken:     proxyToken,
-		//Variables:     variables.Items,
+		Variables:      variables.Items,
 	})
 
 	a.logger.Debug("starting job")

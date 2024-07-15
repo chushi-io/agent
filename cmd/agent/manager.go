@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"github.com/chushi-io/agent/adapter"
 	"github.com/chushi-io/agent/agent"
 	"github.com/chushi-io/agent/driver"
 	"github.com/chushi-io/agent/internal/auth"
@@ -62,6 +63,11 @@ func runManager(cmd *cobra.Command, args []string) {
 		agent.WithOrganizationId(os.Getenv("ORGANIZATION_ID")),
 		agent.WithChushiClient(sling.New().Base(serverUrl).Set("Authorization", fmt.Sprintf("Bearer %s", os.Getenv("TFE_TOKEN")))),
 		agent.WithAuthorizer(auth.New(auth.NewMemoryStore())),
+		agent.WithAdapter(adapter.Queue{
+			OrganizationId: os.Getenv("ORGANIZATION_ID"),
+			Sdk:            tfeClient,
+			Logger:         logger,
+		}),
 	}
 
 	var drv driver.Driver
@@ -106,7 +112,7 @@ func runManager(cmd *cobra.Command, args []string) {
 			)
 		}
 	}()
-	if err := ag.Run(os.Getenv("CHUSHI_TOKEN")); err != nil {
+	if err := ag.Run(); err != nil {
 		logger.Fatal("Failed", zap.Error(err))
 	}
 }

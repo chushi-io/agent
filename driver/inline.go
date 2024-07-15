@@ -55,10 +55,13 @@ func (i Inline) Wait(job *Job) (*Job, error) {
 		operation = "apply"
 	}
 
-	fmt.Println(filepath.Join(
-		job.Status.Metadata["git_directory"],
-		job.Spec.Workspace.WorkingDirectory,
-	))
+	for _, variable := range job.Spec.Variables {
+		if variable.HCL == false {
+			os.Setenv(fmt.Sprintf("TF_VAR_%s", variable.Key), variable.Value)
+		}
+	}
+
+	os.Setenv("TF_WORKSPACE", job.Spec.Workspace.Name)
 
 	rnr := runner.New(
 		runner.WithLogger(i.Logger),
@@ -88,6 +91,14 @@ func (i Inline) Wait(job *Job) (*Job, error) {
 }
 
 func (i Inline) Cleanup(job *Job) error {
+	for _, variable := range job.Spec.Variables {
+		if variable.HCL == false {
+			os.Unsetenv(fmt.Sprintf("TF_VAR_%s", variable.Key))
+		}
+	}
+
+	os.Unsetenv("TF_WORKSPACE")
+
 	if err := os.RemoveAll(job.Status.Metadata["git_directory"]); err != nil {
 		i.Logger.Warn(err.Error())
 	}

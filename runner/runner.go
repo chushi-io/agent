@@ -131,6 +131,8 @@ func (r *Runner) Run(ctx context.Context, out io.Writer) error {
 		return err
 	}
 
+	fmt.Println(r.workingDirectory)
+
 	tf, err := tfexec.NewTerraform(r.workingDirectory, install)
 	if err != nil {
 		return err
@@ -144,11 +146,25 @@ credentials "caring-foxhound-whole.ngrok-free.app" {
 }
 `, r.backendToken)), 0644)
 	defer os.Remove(filepath.Join(pwd, ".terraformrc"))
+
+	env := map[string]string{
+		"TF_FORCE_LOCAL_BACKEND": "1",
+	}
+
+	envs := os.Environ()
+	for _, e := range envs {
+		chunks := strings.Split(e, "=")
+		if strings.HasPrefix(chunks[0], "TF_VAR_") {
+			env[chunks[0]] = chunks[1]
+		}
+	}
+
 	//tf.SetStdout(os.Stdout)
 	//tf.SetStderr(os.Stdout)
-	tf.SetEnv(map[string]string{
-		"TF_FORCE_LOCAL_BACKEND": "1",
-	})
+	if err = tf.SetEnv(env); err != nil {
+		fmt.Println(err)
+	}
+	fmt.Println(os.Environ())
 	r.logger.Info("intializing tofu")
 	err = tf.Init(ctx, tfexec.Upgrade(false))
 	if err != nil {
@@ -156,6 +172,12 @@ credentials "caring-foxhound-whole.ngrok-free.app" {
 	}
 
 	r.logger.Info("tofu initialized")
+
+	if os.Getenv("TF_WORKSPACE") != "" {
+		if err := tf.WorkspaceSelect(ctx, os.Getenv("TF_WORKSPACE")); err != nil {
+			return err
+		}
+	}
 	var hasChanges bool
 
 	switch r.operation {
