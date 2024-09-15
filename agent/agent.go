@@ -5,9 +5,9 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"github.com/chushi-io/agent/adapter"
-	"github.com/chushi-io/agent/driver"
 	"github.com/chushi-io/agent/internal/auth"
+	"github.com/chushi-io/agent/internal/driver"
+	"github.com/chushi-io/agent/internal/listener"
 	"github.com/chushi-io/agent/internal/server"
 	"github.com/chushi-io/agent/types"
 	"github.com/dghubble/sling"
@@ -21,21 +21,18 @@ import (
 )
 
 type Agent struct {
-	id                    string
 	runnerImage           string
 	runnerImagePullPolicy string
 	logger                *zap.Logger
-	organizationId        string
-	sdk                   *tfe.Client
+	sdkResolver           func(event *listener.Event) *tfe.Client
 	chushiClient          *sling.Sling
 	authorizer            *auth.Auth
 
-	adapter adapter.Adapter
-	driver  driver.Driver
-	bus     *eventbus.EventBus
+	driver driver.Driver
+	bus    *eventbus.EventBus
 }
 
-func New(options ...func(*Agent)) *Agent {
+func New(events bool, options ...func(*Agent)) *Agent {
 	ag := &Agent{
 		bus: eventbus.New(),
 	}
@@ -43,67 +40,58 @@ func New(options ...func(*Agent)) *Agent {
 		o(ag)
 	}
 
-	// Register event handlers
-	eventbus.Subscribe[*PlanStartedEvent](ag.bus)(func(ctx context.Context, event *PlanStartedEvent) error {
-		_, err := ag.chushiClient.Put(fmt.Sprintf("/agents/v1/plans/%s", event.Plan.ID)).BodyJSON(&types.RunStatusUpdate{
-			Status: "started",
-		}).ReceiveSuccess(nil)
-		return err
-	})
-	eventbus.Subscribe[*PlanCompletedEvent](ag.bus)(func(ctx context.Context, event *PlanCompletedEvent) error {
-		_, err := ag.chushiClient.Put(fmt.Sprintf("/agents/v1/plans/%s", event.Plan.ID)).BodyJSON(&types.RunStatusUpdate{
-			Status: "finished",
-		}).ReceiveSuccess(nil)
-		return err
-	})
-	eventbus.Subscribe[*PlanFailedEvent](ag.bus)(func(ctx context.Context, event *PlanFailedEvent) error {
-		_, err := ag.chushiClient.Put(fmt.Sprintf("/agents/v1/plans/%s", event.Plan.ID)).BodyJSON(&types.RunStatusUpdate{
-			Status: "errored",
-		}).ReceiveSuccess(nil)
-		return err
-	})
-	eventbus.Subscribe[*ApplyStartedEvent](ag.bus)(func(ctx context.Context, event *ApplyStartedEvent) error {
-		_, err := ag.chushiClient.Put(fmt.Sprintf("/agents/v1/applies/%s", event.Apply.ID)).BodyJSON(&types.RunStatusUpdate{
-			Status: "started",
-		}).ReceiveSuccess(nil)
-		return err
-	})
-	eventbus.Subscribe[*ApplyCompletedEvent](ag.bus)(func(ctx context.Context, event *ApplyCompletedEvent) error {
-		_, err := ag.chushiClient.Put(fmt.Sprintf("/agents/v1/applies/%s", event.Apply.ID)).BodyJSON(&types.RunStatusUpdate{
-			Status: "finished",
-		}).ReceiveSuccess(nil)
-		return err
-	})
-	eventbus.Subscribe[*ApplyFailedEvent](ag.bus)(func(ctx context.Context, event *ApplyFailedEvent) error {
-		_, err := ag.chushiClient.Put(fmt.Sprintf("/agents/v1/applies/%s", event.Apply.ID)).BodyJSON(&types.RunStatusUpdate{
-			Status: "errored",
-		}).ReceiveSuccess(nil)
-		return err
-	})
+	if events {
+		// Register event handlers
+		eventbus.Subscribe[*PlanStartedEvent](ag.bus)(func(ctx context.Context, event *PlanStartedEvent) error {
+			_, err := ag.chushiClient.Put(fmt.Sprintf("/agents/v1/plans/%s", event.Plan.ID)).BodyJSON(&types.RunStatusUpdate{
+				Status: "started",
+			}).ReceiveSuccess(nil)
+			return err
+		})
+		eventbus.Subscribe[*PlanCompletedEvent](ag.bus)(func(ctx context.Context, event *PlanCompletedEvent) error {
+			_, err := ag.chushiClient.Put(fmt.Sprintf("/agents/v1/plans/%s", event.Plan.ID)).BodyJSON(&types.RunStatusUpdate{
+				Status: "finished",
+			}).ReceiveSuccess(nil)
+			return err
+		})
+		eventbus.Subscribe[*PlanFailedEvent](ag.bus)(func(ctx context.Context, event *PlanFailedEvent) error {
+			_, err := ag.chushiClient.Put(fmt.Sprintf("/agents/v1/plans/%s", event.Plan.ID)).BodyJSON(&types.RunStatusUpdate{
+				Status: "errored",
+			}).ReceiveSuccess(nil)
+			return err
+		})
+		eventbus.Subscribe[*ApplyStartedEvent](ag.bus)(func(ctx context.Context, event *ApplyStartedEvent) error {
+			_, err := ag.chushiClient.Put(fmt.Sprintf("/agents/v1/applies/%s", event.Apply.ID)).BodyJSON(&types.RunStatusUpdate{
+				Status: "started",
+			}).ReceiveSuccess(nil)
+			return err
+		})
+		eventbus.Subscribe[*ApplyCompletedEvent](ag.bus)(func(ctx context.Context, event *ApplyCompletedEvent) error {
+			_, err := ag.chushiClient.Put(fmt.Sprintf("/agents/v1/applies/%s", event.Apply.ID)).BodyJSON(&types.RunStatusUpdate{
+				Status: "finished",
+			}).ReceiveSuccess(nil)
+			return err
+		})
+		eventbus.Subscribe[*ApplyFailedEvent](ag.bus)(func(ctx context.Context, event *ApplyFailedEvent) error {
+			_, err := ag.chushiClient.Put(fmt.Sprintf("/agents/v1/applies/%s", event.Apply.ID)).BodyJSON(&types.RunStatusUpdate{
+				Status: "errored",
+			}).ReceiveSuccess(nil)
+			return err
+		})
+	}
+
 	return ag
 }
 
-func WithSdk(sdk *tfe.Client) func(agent *Agent) {
+func WithSdkResolver(sdkResolver func(event *listener.Event) *tfe.Client) func(agent *Agent) {
 	return func(agent *Agent) {
-		agent.sdk = sdk
+		agent.sdkResolver = sdkResolver
 	}
 }
 
 func WithDriver(drv driver.Driver) func(agent *Agent) {
 	return func(agent *Agent) {
 		agent.driver = drv
-	}
-}
-
-func WithAdapter(ad adapter.Adapter) func(agent *Agent) {
-	return func(agent *Agent) {
-		agent.adapter = ad
-	}
-}
-
-func WithAgentId(agentId string) func(agent *Agent) {
-	return func(agent *Agent) {
-		agent.id = agentId
 	}
 }
 
@@ -117,12 +105,6 @@ func WithRunnerImage(runnerImage string, pullPolicy string) func(agent *Agent) {
 func WithLogger(logger *zap.Logger) func(agent *Agent) {
 	return func(agent *Agent) {
 		agent.logger = logger
-	}
-}
-
-func WithOrganizationId(organizationId string) func(agent *Agent) {
-	return func(agent *Agent) {
-		agent.organizationId = organizationId
 	}
 }
 
@@ -143,9 +125,16 @@ func (a *Agent) Grpc(addr string) error {
 	return http.ListenAndServe(addr, srv)
 }
 
-func (a *Agent) Run() error {
-	a.adapter.Listen(func(run *tfe.Run) error {
+func (a *Agent) Run(ad listener.Listener) error {
+	ad.Listen(func(event *listener.Event) error {
 		ctx := context.Background()
+
+		sdk := a.sdkResolver(event)
+
+		run, err := sdk.Runs.Read(context.TODO(), event.RunId)
+		if err != nil {
+			return err
+		}
 
 		var operation string
 		if run.Status == tfe.RunApplyQueued {
@@ -163,7 +152,7 @@ func (a *Agent) Run() error {
 		}
 
 		a.logger.Debug("Starting run", zap.String("run", run.ID))
-		if err := a.handle(run); err != nil {
+		if err := a.handle(run, sdk, event.OrganizationId); err != nil {
 			a.logger.Error("Run failed", zap.Error(err))
 			if operation == "plan" {
 				eventbus.Publish[*PlanFailedEvent](a.bus)(ctx, &PlanFailedEvent{Plan: run.Plan, Error: err})
@@ -183,9 +172,9 @@ func (a *Agent) Run() error {
 	return nil
 }
 
-func (a *Agent) handle(run *tfe.Run) error {
+func (a *Agent) handle(run *tfe.Run, sdk *tfe.Client, organizationId string) error {
 	a.logger.Debug("getting workspace data")
-	ws, err := a.sdk.Workspaces.Read(context.TODO(), a.organizationId, run.Workspace.ID)
+	ws, err := sdk.Workspaces.Read(context.TODO(), organizationId, run.Workspace.ID)
 	if err != nil {
 		return err
 	}
@@ -213,20 +202,20 @@ func (a *Agent) handle(run *tfe.Run) error {
 	}
 
 	a.logger.Debug("getting configuration version")
-	confVersion, err := a.sdk.ConfigurationVersions.Read(context.TODO(), run.ConfigurationVersion.ID)
+	confVersion, err := sdk.ConfigurationVersions.Read(context.TODO(), run.ConfigurationVersion.ID)
 	if err != nil {
 		return err
 	}
 
 	a.logger.Debug("getting variables")
-	variables, err := a.sdk.Variables.List(context.TODO(), ws.ID, &tfe.VariableListOptions{})
+	variables, err := sdk.Variables.List(context.TODO(), ws.ID, &tfe.VariableListOptions{})
 	if err != nil {
 		return err
 	}
 
 	// Build a job spec
 	job := driver.NewJob(&driver.JobSpec{
-		OrganizationId: a.organizationId,
+		OrganizationId: organizationId,
 		Image:          a.getRunnerImage(),
 		Run:            run,
 		Workspace:      ws,
