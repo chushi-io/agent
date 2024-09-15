@@ -1,4 +1,4 @@
-package adapter
+package listener
 
 import (
 	"context"
@@ -22,9 +22,19 @@ func (q Queue) Listen(handler runHandler) {
 		}
 
 		for _, run := range runQueue.Items {
-			handler(run)
+			if err = handler(&Event{
+				RunId:          run.ID,
+				OrganizationId: q.OrganizationId,
+				WorkspaceId:    run.Workspace.ID,
+			}); err != nil {
+				q.Logger.Error("failed handling run", zap.Error(err))
+			}
 		}
 
 		time.Sleep(time.Second * 1)
 	}
+}
+
+func (q Queue) Client() *tfe.Client {
+	return q.Sdk
 }
