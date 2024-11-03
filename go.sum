@@ -24,6 +24,16 @@ github.com/chushi-io/chushi-go-sdk v0.0.0-20240927011333-469a77dd271b h1:PZOolQo
 github.com/chushi-io/chushi-go-sdk v0.0.0-20240927011333-469a77dd271b/go.mod h1:VwnxNoRln7qWtok3z4ivFXgs0Xgol49VKgYi+fAmdO0=
 github.com/chushi-io/chushi-go-sdk v0.0.0-20240927014834-242553214634 h1:rDdmg69l7f50gdkUz22K5Qo2X+t68nlBHOQNTPgoRYE=
 github.com/chushi-io/chushi-go-sdk v0.0.0-20240927014834-242553214634/go.mod h1:VwnxNoRln7qWtok3z4ivFXgs0Xgol49VKgYi+fAmdO0=
+github.com/chushi-io/chushi-go-sdk v0.0.0-20241003004008-95f395c07524 h1:YLatWRlJ6hwhl455UamJCTV9NrKSqEDWDi7XMGaGWck=
+github.com/chushi-io/chushi-go-sdk v0.0.0-20241003004008-95f395c07524/go.mod h1:VwnxNoRln7qWtok3z4ivFXgs0Xgol49VKgYi+fAmdO0=
+github.com/chushi-io/chushi-go-sdk v0.0.0-20241019011034-3c448b5576c9 h1:rDvLPpnce4j9L7kkhuShFVKUU4VQ4SGss8zJ2fmlTYw=
+github.com/chushi-io/chushi-go-sdk v0.0.0-20241019011034-3c448b5576c9/go.mod h1:VwnxNoRln7qWtok3z4ivFXgs0Xgol49VKgYi+fAmdO0=
+github.com/chushi-io/chushi-go-sdk v0.0.0-20241019011137-17beca969626 h1:i04IjzC5SwlDPUtkhowaDABT+Ubef281LwXGopsxdJ8=
+github.com/chushi-io/chushi-go-sdk v0.0.0-20241019011137-17beca969626/go.mod h1:VwnxNoRln7qWtok3z4ivFXgs0Xgol49VKgYi+fAmdO0=
+github.com/chushi-io/chushi-go-sdk v0.0.0-20241019011604-8c5f29ba63b3 h1:yK3xnURkO76rrz2oYMkAisCot36ssTLzKhtf9Ki/opI=
+github.com/chushi-io/chushi-go-sdk v0.0.0-20241019011604-8c5f29ba63b3/go.mod h1:VwnxNoRln7qWtok3z4ivFXgs0Xgol49VKgYi+fAmdO0=
+github.com/chushi-io/chushi-go-sdk v0.0.0-20241019011820-6fd46a1d9f94 h1:E1yK2zNZgGceX4yv0FqtUh90XEVl8EIsOWNE3p42org=
+github.com/chushi-io/chushi-go-sdk v0.0.0-20241019011820-6fd46a1d9f94/go.mod h1:VwnxNoRln7qWtok3z4ivFXgs0Xgol49VKgYi+fAmdO0=
 github.com/cloudflare/circl v1.3.7 h1:qlCDlTPz2n9fu58M0Nh1J/JzcFpfgkFHHX3O35r5vcU=
 github.com/cloudflare/circl v1.3.7/go.mod h1:sRTcRWXGLrKw6yIGJ+l7amYJFfAXbZG0kBSc8r4zxgA=
 github.com/containerd/log v0.1.0 h1:TCJt7ioM2cr/tfR8GPbGf9/VRAX8D2B4PjzCpfX540I=

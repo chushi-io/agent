@@ -6,7 +6,7 @@ replace github.com/chush-io/chushi-go-sdk => /Users/rwittman/Repos/chushi-io/chu
 
 require (
 	connectrpc.com/connect v1.16.1
-	github.com/chushi-io/chushi-go-sdk v0.0.0-20240927014834-242553214634
+	github.com/chushi-io/chushi-go-sdk v0.0.0-20241019011820-6fd46a1d9f94
 	github.com/dghubble/sling v1.4.2
 	github.com/docker/docker v26.1.0+incompatible
 	github.com/google/uuid v1.6.0

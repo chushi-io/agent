@@ -1,4 +1,4 @@
-package main
+package poller
 
 import (
 	"bytes"
@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"github.com/chushi-io/chushi-go-sdk"
 	"github.com/hashicorp/go-tfe"
+	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/kubernetes"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,23 +23,27 @@ type Poller struct {
 	Sdk       *chushi.Sdk
 	Client    *tfe.Client
 	ClientSet *kubernetes.Clientset
+	Logger    *zap.Logger
 }
 
-func NewPoller(sdk *chushi.Sdk, clientSet *kubernetes.Clientset, tfeClient *tfe.Client) *Poller {
-	return &Poller{Sdk: sdk, ClientSet: clientSet, Client: tfeClient}
+func New(sdk *chushi.Sdk, clientSet *kubernetes.Clientset, tfeClient *tfe.Client, logger *zap.Logger) *Poller {
+	return &Poller{Sdk: sdk, ClientSet: clientSet, Client: tfeClient, Logger: logger}
 }
 
 func (p *Poller) Poll(agentId string) error {
 	for {
+		p.Logger.Debug("queuing jobs")
 		jobs, err := p.Sdk.Jobs.List(agentId)
 		if err != nil {
-			fmt.Println(err.Error())
+			p.Logger.Error("failed processing job", zap.Error(err))
 			time.Sleep(time.Second * 1)
 		}
-		for _, job := range jobs {
+
+		for _, job := range jobs.Items {
+			p.Logger.Debug("processing job", zap.String("job.id", job.ID))
 			// Lock / ack the job
 			if jobErr := p.processManager(job.ID); jobErr != nil {
-				fmt.Println(jobErr)
+				p.Logger.Error("failed processing job", zap.Error(jobErr))
 				continue
 			}
 		}
@@ -47,32 +54,38 @@ func (p *Poller) Poll(agentId string) error {
 func (p *Poller) processManager(jobId string) error {
 	ctx := context.TODO()
 	// Lock the job
+	logger := p.Logger.With(zap.String("job.id", jobId))
+	logger.Debug("locking job", zap.String("job.id", jobId))
 	if _, err := p.Sdk.Jobs.Lock(jobId, os.Getenv("HOSTNAME")); err != nil {
 		return err
 	}
 
-	// Requery the job
+	// Requery the job, which ensures that we have a locked job. This
+	// is probably not 100%, but its what we're doing for now
+	logger.Debug("reading job")
 	job, err := p.Sdk.Jobs.Read(jobId)
 	if err != nil {
 		return err
 	}
 	// Update as running
+	logger.Debug("updating job as running")
 	if _, err := p.Sdk.Jobs.Update(jobId, "running"); err != nil {
 		return err
 	}
 
 	// Job is locked, we can process it
+	logger.Debug("starting job processing")
 	if err := p.process(ctx, job); err != nil {
-		fmt.Println(err)
+		logger.Error("failed processing job", zap.Error(err))
 		// Update as failed
-		if _, updateErr := p.Sdk.Jobs.Update(jobId, "errored"); err != nil {
-			fmt.Println(err)
+		if _, updateErr := p.Sdk.Jobs.Update(jobId, "errored"); updateErr != nil {
+			logger.Error("failed setting job as errored", zap.Error(updateErr))
 			return updateErr
 		}
 		return err
 	}
 	// Update as completed
-	_, err = p.Sdk.Jobs.Update(jobId, "completed")
+	//_, err = p.Sdk.Jobs.Update(jobId, "completed")
 	return err
 }
 
@@ -125,7 +138,7 @@ func (p *Poller) process(ctx context.Context, job *chushi.Job) error {
 
 	fileMappings := map[string]string{
 		".terraform_environment": ".terraform/environment",
-		"terraform.tfvars":       fmt.Sprintf("%s/terraform.tfvars", run.Workspace.WorkingDirectory),
+		"terraform.tfvars":       filepath.Join(run.Workspace.WorkingDirectory, "terraform.tfvars"),
 	}
 	configMapData := map[string]string{
 		".terraform_environment": run.Workspace.Name,
@@ -166,8 +179,8 @@ func (p *Poller) process(ctx context.Context, job *chushi.Job) error {
 	}
 
 	podSpec, err := podForRun(
+		job,
 		run,
-		job.Operation,
 		runToken,
 		fileMappings,
 		oidcSecret.Name,
@@ -183,13 +196,60 @@ func (p *Poller) process(ctx context.Context, job *chushi.Job) error {
 	}
 
 	// TODO: Poll and watch the pod?
+	go func() {
+		//labelSelector := &metav1.LabelSelector{
+		//	MatchLabels: podSpec.Labels,
+		//}
+		//selector, err := metav1.LabelSelectorAsSelector(labelSelector)
+		//if err != nil {
+		//	p.Logger.Error("failed generating selector", zap.Error(err))
+		//	return
+		//}
+		//p.Logger.Info(selector.String())
+		watch, err := p.ClientSet.CoreV1().Pods(namespace).Watch(ctx, metav1.ListOptions{
+			FieldSelector: fields.OneTermEqualSelector(metav1.ObjectNameField, podSpec.Name).String(),
+		})
+
+		if err != nil {
+			p.Logger.Error("failed creating watch listener", zap.Error(err))
+			return
+		}
+		for event := range watch.ResultChan() {
+			//fmt.Printf("Type: %v\n", event.Type)
+			pod, ok := event.Object.(*corev1.Pod)
+			if !ok {
+				log.Fatal("unexpected type")
+			}
+			p.Logger.Info(
+				"pod status change",
+				zap.String("job.id", job.ID),
+				zap.String("pod.phase", string(pod.Status.Phase)),
+				zap.String("pod.name", pod.Name),
+			)
+			switch pod.Status.Phase {
+			case corev1.PodSucceeded:
+				p.Logger.Info("updating job as completed", zap.String("job.id", job.ID))
+				if _, err := p.Sdk.Jobs.Update(job.ID, "completed"); err != nil {
+					p.Logger.Error("failed updating job", zap.String("job.id", job.ID))
+				}
+				return
+			case corev1.PodFailed:
+				p.Logger.Info("updating job as failed", zap.String("job.id", job.ID))
+				if _, err := p.Sdk.Jobs.Update(job.ID, "errored"); err != nil {
+					p.Logger.Error("failed updating job", zap.String("job.id", job.ID))
+				}
+				return
+			}
+		}
+		time.Sleep(time.Second)
+	}()
 
 	return nil
 }
 
 func podForRun(
+	job *chushi.Job,
 	run *tfe.Run,
-	operation string,
 	token string,
 	fileMappings map[string]string,
 	identitySecret string,
@@ -222,16 +282,23 @@ cat /configuration/{{ $item }} > /workspace/{{ $.WorkingDirectory }}/{{ $path }}
 	runnerArgs := []string{
 		fmt.Sprintf("--directory=/workspace/%s", run.Workspace.WorkingDirectory),
 		// TODO: Pull this from configuration somewhere
-		fmt.Sprintf("--log-address=%s", "http://host.minikube.internal:8080"),
+		fmt.Sprintf("--log-stream-url=%s", "http://host.minikube.internal:8080"),
 		fmt.Sprintf("--run-id=%s", run.ID),
 		"--debug",
 	}
-	fmt.Println(run.Workspace.TerraformVersion)
+
+	if run.IsDestroy {
+		runnerArgs = append(runnerArgs, "--destroy")
+	}
+	for linkName, linkUrl := range job.Links {
+		runnerArgs = append(runnerArgs, fmt.Sprintf("--%s=%s", linkName, linkUrl))
+	}
+
 	if run.Workspace.TerraformVersion != "" {
 		runnerArgs = append(runnerArgs, fmt.Sprintf("--version=%s", run.Workspace.TerraformVersion))
 	}
 	// Add any additional arguments
-	runnerArgs = append(runnerArgs, operation)
+	runnerArgs = append(runnerArgs, job.Operation)
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "chushi-run-",
